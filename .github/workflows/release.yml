@@ -1,0 +1,135 @@
+name: Build server release
+
+on:
+  push:
+    branches:
+      - master
+    tags:
+      - "v*"
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-2022
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install LDC
+        uses: dlang-community/setup-dlang@v2
+        with:
+          compiler: ldc-1.38.0
+
+      # The web process only launches the 32-bit SAPI helpers, so it can be
+      # 64-bit. This also works with the x64-only LDC packages used by CI.
+      - name: Build web server
+        working-directory: SAPI4_web
+        run: dub build --compiler=ldc2 --arch=x86_64 --build=release
+
+      - name: Extract SAPI 4 SDK header
+        shell: pwsh
+        run: |
+          $sevenZip = Join-Path $env:ProgramFiles "7-Zip\7z.exe"
+          & $sevenZip x SAPI4SDK.exe "-o$pwd\sdk-outer" -y
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if (-not (Test-Path sdk-outer\spchsdk.exe)) { throw "SAPI SDK inner archive was not extracted" }
+
+          & $sevenZip x sdk-outer\spchsdk.exe "-o$pwd\sdk" -y
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if (-not (Test-Path sdk\ipeech.h)) { throw "SAPI SDK speech header was not extracted" }
+
+          # The SDK cabinet stores speech.h under its compressed source name.
+          Copy-Item sdk\ipeech.h sdk\speech.h
+
+      - name: Enable x86 MSVC tools
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x86
+
+      - name: Build SAPI helpers
+        shell: pwsh
+        run: |
+          cl.exe /nologo sapi4.cpp ole32.lib user32.lib /MT /LD /O2 /I"$pwd\sdk" /link /OUT:sapi4.dll
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          cl.exe /nologo sapi4out.cpp ole32.lib user32.lib sapi4.lib /MT /O2 /I"$pwd\sdk" /link /OUT:sapi4out.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          cl.exe /nologo sapi4limits.cpp ole32.lib user32.lib sapi4.lib /MT /O2 /I"$pwd\sdk" /link /OUT:sapi4limits.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Assemble deployment archive
+        id: package
+        shell: pwsh
+        run: |
+          $bundle = Join-Path $pwd "dist\SAPI4-server"
+          New-Item -ItemType Directory -Path $bundle -Force | Out-Null
+
+          Copy-Item sapi4.dll, sapi4out.exe, sapi4limits.exe, spchapi.exe, tv_enua.exe $bundle
+          Copy-Item SAPI4_web\sapi4.exe $bundle
+          Copy-Item SAPI4_web\public $bundle -Recurse
+
+          # Include OpenSSL DLLs emitted beside the D executable, if any.
+          Get-ChildItem SAPI4_web -Filter *.dll -File | Copy-Item -Destination $bundle
+
+          # If OpenSSL is linked dynamically but DUB left the DLLs in its
+          # package cache, find the exact imported names and add their x64
+          # variants beside sapi4.exe.
+          $dependencyOutput = dumpbin.exe /DEPENDENTS SAPI4_web\sapi4.exe | Out-String
+          $openSslDependencies = [regex]::Matches(
+            $dependencyOutput,
+            '(?im)^\s*((?:libssl|libcrypto)[^\s]*\.dll|ssleay32\.dll|libeay32\.dll)\s*$'
+          ) | ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique
+
+          foreach ($dependency in $openSslDependencies) {
+            if (Test-Path (Join-Path $bundle $dependency)) { continue }
+
+            $searchRoots = @(
+              (Join-Path $env:LOCALAPPDATA "dub"),
+              (Split-Path (Get-Command ldc2).Source -Parent)
+            ) | Where-Object { Test-Path $_ }
+
+            $source = Get-ChildItem $searchRoots -Filter $dependency -File -Recurse -ErrorAction SilentlyContinue |
+              Where-Object { (dumpbin.exe /HEADERS $_.FullName | Out-String) -match '8664 machine' } |
+              Select-Object -First 1
+            if (-not $source) { throw "Could not locate x64 runtime dependency $dependency" }
+            Copy-Item $source.FullName $bundle
+          }
+
+          $missing = @(
+            "sapi4.exe", "sapi4.dll", "sapi4out.exe", "sapi4limits.exe",
+            "spchapi.exe", "tv_enua.exe", "public\style.css",
+            "public\scripts\tts.js"
+          ) | Where-Object { -not (Test-Path (Join-Path $bundle $_)) }
+          if ($missing) { throw "Deployment bundle is missing: $($missing -join ', ')" }
+
+          $suffix = if ($env:GITHUB_REF_TYPE -eq "tag") { $env:GITHUB_REF_NAME } else { $env:GITHUB_SHA.Substring(0, 7) }
+          $archive = Join-Path $pwd "dist\SAPI4-server-$suffix-windows.zip"
+          Compress-Archive -Path "$bundle\*" -DestinationPath $archive
+          "archive=$archive" >> $env:GITHUB_OUTPUT
+          "archive_name=$(Split-Path $archive -Leaf)" >> $env:GITHUB_OUTPUT
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.package.outputs.archive_name }}
+          path: ${{ steps.package.outputs.archive }}
+          if-no-files-found: error
+
+      - name: Publish GitHub release
+        if: github.ref_type == 'tag'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARCHIVE: ${{ steps.package.outputs.archive }}
+        run: |
+          if (gh release view $env:GITHUB_REF_NAME *> $null) {
+            gh release upload $env:GITHUB_REF_NAME $env:ARCHIVE --clobber
+          } else {
+            gh release create $env:GITHUB_REF_NAME $env:ARCHIVE --generate-notes --title $env:GITHUB_REF_NAME
+          }
