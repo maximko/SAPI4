@@ -300,6 +300,12 @@ extern __declspec(dllexport) BOOL InitializeForVoice(
 		return FALSE;
 	}
 
+	// IAudio::RealTimeSet controls how quickly the destination consumes audio,
+	// while ITTSAttributes::RealTimeSet tells the engine how quickly it should
+	// produce it.  File synthesis needs both sides set to the maximum; otherwise
+	// some engines pace their output as if it were being played through speakers.
+	pVoiceInfo->pITTSAttributes->RealTimeSet(TTSATTR_MAXREALTIME);
+
 	pVoiceInfo->pNotify = new CTestNotify(pVoiceInfo);
 
 	DWORD dwRegKey;
@@ -318,6 +324,5 @@ extern __declspec(dllexport) BOOL InitializeForVoice(
 	
 	return TRUE;
 }
-
 
 
