@@ -1,7 +1,6 @@
 import vibe.vibe;
 import std.algorithm;
 import std.conv;
-import std.encoding;
 import std.string;
 import std.array;
 import std.process;
@@ -95,9 +94,7 @@ class SAMService
 	void getSAPI4(HTTPServerRequest req, HTTPServerResponse res)
 	{
 		try {
-			string textRaw = req.query.get("text", "");
-			AsciiString text;
-			transcode(textRaw, text);
+			string text = req.query.get("text", "");
 
 			if (text == "" || text.length > 4095) {
 				res.writeBody("Invalid text", 400);
@@ -136,7 +133,7 @@ class SAMService
 				return;
 			}
 
-			auto proc = pipeProcess(["sapi4out.exe", voice, to!string(pitch), to!string(speed), cast(string)text], Redirect.all);
+			auto proc = pipeProcess(["sapi4out.exe", voice, to!string(pitch), to!string(speed), text], Redirect.all);
 
 			auto executedAt = Clock.currTime;
 			auto wait = tryWait(proc.pid);
