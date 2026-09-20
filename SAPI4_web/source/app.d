@@ -138,7 +138,7 @@ class SAMService
 			auto executedAt = Clock.currTime;
 			auto wait = tryWait(proc.pid);
 
-			while (!wait.terminated && Clock.currTime - executedAt < dur!"seconds"(10)) {
+			while (!wait.terminated && Clock.currTime - executedAt < dur!"seconds"(60)) {
 				wait = tryWait(proc.pid);
 				sleep(dur!"msecs"(100));
 			}
