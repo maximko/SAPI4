@@ -246,6 +246,10 @@ extern __declspec(dllexport) BOOL GetTTS(
 	if (pVoiceInfo->pIAF->Set(wszFile, 1)) {
 		return FALSE;
 	}
+
+	// Opening a new destination can reset its pacing attributes. Apply the
+	// batch/file-synthesis rate to the active file, not only during voice setup.
+	pVoiceInfo->pIAF->RealTimeSet(TTSATTR_MAXREALTIME);
 	
 	pVoiceInfo->pITTSAttributes->PitchSet(Pitch);
 	pVoiceInfo->pITTSAttributes->SpeedSet(Speed);
@@ -324,5 +328,4 @@ extern __declspec(dllexport) BOOL InitializeForVoice(
 	
 	return TRUE;
 }
-
 
