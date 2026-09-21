@@ -6,82 +6,8 @@ import std.array;
 import std.process;
 import core.stdc.stdlib;
 import std.datetime;
-import std.format : format;
 import std.parallelism;
 import std.file;
-
-enum string NIKOLAI_VOICE = "Digalo Russian Nicolai";
-
-bool linuxFfmpegAvailable()
-{
-	return exists(`Z:\usr\bin\ffmpeg`);
-}
-
-string unixPathForWorkingFile(string file)
-{
-	auto cwd = getcwd().replace('\\', '/');
-	if (cwd.length < 3 || cwd[1] != ':' || (cwd[0] != 'Z' && cwd[0] != 'z'))
-		return "";
-
-	return cwd[2 .. $] ~ "/" ~ file;
-}
-
-string tempoFilter(double tempo)
-{
-	// FFmpeg's atempo filter accepts 0.5 and above. Chain two filters for
-	// Nikolai's lowest rates, where max-rate synthesis needs more stretching.
-	if (tempo < 0.5)
-		return "atempo=0.5,atempo=" ~ format("%.8f", tempo / 0.5);
-	return "atempo=" ~ format("%.8f", tempo);
-}
-
-bool restoreTempo(string file, long requestedSpeed, uint synthesisSpeed)
-{
-	auto input = unixPathForWorkingFile(file);
-	auto outputFile = file ~ ".tempo.wav";
-	auto output = unixPathForWorkingFile(outputFile);
-	if (input == "" || output == "")
-		return false;
-
-	if (exists(outputFile))
-		remove(outputFile);
-
-	// Wine's start.exe /unix bridge lets the Windows web server use the host's
-	// FFmpeg. It returns before FFmpeg, so wait until the output has stopped
-	// growing before replacing the original fast-speech WAV.
-	auto launch = execute([
-		"start.exe", "/unix", "/usr/bin/ffmpeg", "-nostdin", "-y",
-		"-loglevel", "error", "-i", input, "-filter:a",
-		tempoFilter(cast(double)requestedSpeed / synthesisSpeed),
-		"-f", "wav", output
-	]);
-	if (launch.status != 0)
-		return false;
-
-	ulong previousSize;
-	uint stableSamples;
-	foreach (_; 0 .. 100) {
-		if (exists(outputFile)) {
-			auto currentSize = getSize(outputFile);
-			if (currentSize > 44 && currentSize == previousSize)
-				stableSamples++;
-			else
-				stableSamples = 0;
-			previousSize = currentSize;
-
-			if (stableSamples >= 3) {
-				remove(file);
-				rename(outputFile, file);
-				return true;
-			}
-		}
-		sleep(dur!"msecs"(100));
-	}
-
-	if (exists(outputFile))
-		remove(outputFile);
-	return false;
-}
 
 struct SAM {
 	string voice;
@@ -207,13 +133,7 @@ class SAMService
 				return;
 			}
 
-			uint synthesisSpeed = cast(uint)speed;
-			bool restoreRequestedTempo = voice == NIKOLAI_VOICE &&
-				speed < sam.maxSpeed && linuxFfmpegAvailable();
-			if (restoreRequestedTempo)
-				synthesisSpeed = sam.maxSpeed;
-
-			auto proc = pipeProcess(["sapi4out.exe", voice, to!string(pitch), to!string(synthesisSpeed), text], Redirect.all);
+			auto proc = pipeProcess(["sapi4out.exe", voice, to!string(pitch), to!string(speed), text], Redirect.all);
 
 			auto executedAt = Clock.currTime;
 			auto wait = tryWait(proc.pid);
@@ -247,13 +167,6 @@ class SAMService
 
 			if (file == "") {
 				core.stdc.stdlib.exit(1);
-			}
-
-			if (restoreRequestedTempo && !restoreTempo(file, speed, synthesisSpeed)) {
-				if (exists(file))
-					removeFile(file);
-				res.writeBody("Could not restore Nikolai tempo", 500);
-				return;
 			}
 
 			auto fs = openFile(file, FileMode.read);
